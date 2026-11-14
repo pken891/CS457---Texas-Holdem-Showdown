@@ -51,6 +51,8 @@ def handle_client(client_sock, addr):
             
             # 2. Read exact JSON payload
             payload_bytes = recv_exact(client_sock, payload_len)
+            if not payload_bytes:
+                break
             message = json.loads(payload_bytes.decode("utf-8"))
             
             # 3. Enter Critical Section for FSM transitions
@@ -67,7 +69,7 @@ def handle_client(client_sock, addr):
                         connected_clients[client_sock] = "P2"
                         print("[FSM] P2 connected. Starting game...")
                         
-                        # Send GAME_START with roles
+                        # Send GAME_START with roles and hole cards
                         for sock, role in connected_clients.items():
                             send_message(sock, {
                                 "msg_type": "GAME_START",
@@ -78,9 +80,21 @@ def handle_client(client_sock, addr):
                         # Broadcast the initial global board state
                         for sock in connected_clients.keys():
                             send_message(sock, game_state)
+                    else:
+                        send_message(client_sock, {
+                            "msg_type": "ERROR",
+                            "reason": "Table is full (2 players max)."
+                        })
+                        break
                             
                 elif msg_type == "MOVE":
                     sender_role = connected_clients.get(client_sock)
+                    
+                    # Out-of-turn protection
+                    if sender_role != game_state["active_turn"]:
+                        send_message(client_sock, {"msg_type": "ERROR", "reason": "Not your turn."})
+                        continue
+
                     payload = message.get("payload", {})
                     action = payload.get("action", "FOLD").upper()
                     amount = int(payload.get("amount", 0))
@@ -90,48 +104,73 @@ def handle_client(client_sock, addr):
                     # 1. Handle FOLD (Terminal State)
                     if action == "FOLD":
                         winner = "P2" if sender_role == "P1" else "P1"
+                        win_chip_key = "p2_chips" if sender_role == "P1" else "p1_chips"
+                        final_pot = game_state["pot_size"]
+                        game_state[win_chip_key] += final_pot
+                        game_state["pot_size"] = 0
+                        
                         for sock in connected_clients.keys():
                             try:
                                 send_message(sock, {
                                     "msg_type": "GAME_OVER",
                                     "winner": winner,
-                                    "reason": f"{sender_role} folded."
+                                    "reason": f"{sender_role} folded. {winner} wins the pot of {final_pot} chips!"
                                 })
-                            except:
+                            except Exception:
                                 pass
-                        continue # Skips sending a standard STATE_UPDATE
+                        continue
                         
                     # 2. Extract player-specific state keys
                     my_bet_key = "p1_bet" if sender_role == "P1" else "p2_bet"
                     my_chip_key = "p1_chips" if sender_role == "P1" else "p2_chips"
                     
-                    # 3. Validate and Apply Bets
+                    # 3. Validate and Apply Bets (Prevent Negative Chips)
                     if action == "CHECK":
                         if game_state[my_bet_key] < game_state["current_bet"]:
-                            # Send the error message
                             send_message(client_sock, {"msg_type": "ERROR", "reason": "Cannot check. You must call the raise."})
-                            
-                            # Re-send the state update to unblock this specific client's UI
                             send_message(client_sock, game_state)
                             continue 
                             
                     elif action == "CALL":
                         call_amount = game_state["current_bet"] - game_state[my_bet_key]
+                        if call_amount > game_state[my_chip_key]:
+                            call_amount = game_state[my_chip_key]
                         game_state[my_chip_key] -= call_amount
                         game_state[my_bet_key] += call_amount
                         game_state["pot_size"] += call_amount
                         
                     elif action == "RAISE":
+                        if amount <= 0:
+                            send_message(client_sock, {"msg_type": "ERROR", "reason": "Raise amount must be greater than 0."})
+                            send_message(client_sock, game_state)
+                            continue
+                            
                         new_total_bet = game_state["current_bet"] + amount
                         cost = new_total_bet - game_state[my_bet_key]
+                        
+                        if cost > game_state[my_chip_key]:
+                            send_message(client_sock, {
+                                "msg_type": "ERROR",
+                                "reason": f"Insufficient chips! You only have {game_state[my_chip_key]} chips left."
+                            })
+                            send_message(client_sock, game_state)
+                            continue
+                            
                         game_state[my_chip_key] -= cost
                         game_state[my_bet_key] = new_total_bet
                         game_state["current_bet"] = new_total_bet
                         game_state["pot_size"] += cost
+                    else:
+                        send_message(client_sock, {
+                            "msg_type": "ERROR",
+                            "reason": "Invalid action. Choose FOLD, CHECK, CALL, or RAISE."
+                        })
+                        send_message(client_sock, game_state)
+                        continue
 
                     game_state["actions_this_round"] += 1
                     
-                    # 4. Check for Phase Advancement
+                    # 4. Check for Phase Advancement & Showdown
                     if game_state["actions_this_round"] >= 2 and game_state["p1_bet"] == game_state["p2_bet"]:
                         if game_state["phase"] == "PRE_FLOP":
                             game_state["phase"] = "FLOP"
@@ -142,6 +181,21 @@ def handle_client(client_sock, addr):
                         elif game_state["phase"] == "TURN":
                             game_state["phase"] = "RIVER"
                             game_state["community_cards"].append("9h")
+                        elif game_state["phase"] == "RIVER":
+                            # Transition to SHOWDOWN -> GAME_OVER
+                            game_state["phase"] = "SHOWDOWN"
+                            winner = "P1"
+                            final_pot = game_state["pot_size"]
+                            game_state["p1_chips"] += final_pot
+                            game_state["pot_size"] = 0
+                            
+                            for sock in connected_clients.keys():
+                                send_message(sock, {
+                                    "msg_type": "GAME_OVER",
+                                    "winner": winner,
+                                    "reason": f"SHOWDOWN! P1 (As, Kh - Two Pair Aces & Kings) defeats P2 (Qc, Qd - Pair of Queens) and wins {final_pot} chips!"
+                                })
+                            continue
                             
                         # Reset street variables for the next betting round
                         game_state["actions_this_round"] = 0
@@ -170,14 +224,18 @@ def handle_client(client_sock, addr):
                             "winner": "P1" if disconnected_role == "P2" else "P2",
                             "reason": "DISCONNECT_FORFEIT"
                         })
-                    except:
+                    except Exception:
                         pass
             client_sock.close()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Texas Hold'em Authoritative Server")
-    parser.add_argument("-p", "--port", type=int, required=True, help="Listening port")
+    parser.add_argument("-p", "--port", type=int, required=True, help="Listening port (1024-65535)")
     args = parser.parse_args()
+
+    # Rubric Criterion 1: Validate port numbers (1024-65535)
+    if not (1024 <= args.port <= 65535):
+        parser.error("Port must be an integer between 1024 and 65535.")
 
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

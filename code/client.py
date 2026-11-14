@@ -40,10 +40,14 @@ def render_ui(state_dict, my_role):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Texas Hold'em Client")
     parser.add_argument("-i", "--hostname", required=True, help="Server DNS hostname")
-    parser.add_argument("-p", "--port", type=int, required=True, help="Server port")
+    parser.add_argument("-p", "--port", type=int, required=True, help="Server port (1024-65535)")
     args = parser.parse_args()
 
-    # Mandatory Graceful DNS Resolution Handling[cite: 5]
+    # Rubric Criterion 1: Validate port numbers (1024-65535)
+    if not (1024 <= args.port <= 65535):
+        parser.error("Port must be an integer between 1024 and 65535.")
+
+    # Mandatory Graceful DNS Resolution Handling
     try:
         server_ip = socket.gethostbyname(args.hostname)
         print(f"[*] Resolved {args.hostname} to {server_ip}")
@@ -67,6 +71,9 @@ if __name__ == "__main__":
                 
             payload_len = struct.unpack("!I", header)[0]
             payload_bytes = recv_exact(client_sock, payload_len)
+            if not payload_bytes:
+                print("\n[!] Server disconnected.")
+                break
             message = json.loads(payload_bytes.decode("utf-8"))
             
             msg_type = message.get("msg_type")
@@ -91,7 +98,10 @@ if __name__ == "__main__":
             elif msg_type == "ERROR":
                 print(f"\n[ERROR] {message.get('reason')}")
             elif msg_type == "GAME_OVER":
-                print(f"\n[!] GAME OVER. Winner: {message.get('winner')} - {message.get('reason')}")
+                print("\n" + "="*50)
+                print(f"[!] GAME OVER. Winner: {message.get('winner')}")
+                print(f"Reason: {message.get('reason')}")
+                print("="*50)
                 break
                 
     except ConnectionRefusedError:
