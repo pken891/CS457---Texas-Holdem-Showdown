@@ -10,10 +10,15 @@ game_lock = threading.Lock()
 connected_clients = {}
 game_state = {
     "msg_type": "STATE_UPDATE",
+    "phase": "PRE_FLOP",
     "pot_size": 0,
     "community_cards": [],
     "p1_chips": 1000,
     "p2_chips": 1000,
+    "p1_bet": 0,             # Tracks P1's bet for the current street
+    "p2_bet": 0,             # Tracks P2's bet for the current street
+    "current_bet": 0,        # The highest bet to match
+    "actions_this_round": 0, # Ensures both players get a chance to act
     "active_turn": "P1"
 }
 
@@ -54,17 +59,15 @@ def handle_client(client_sock, addr):
                 
                 if msg_type == "CONNECT":
                     if len(connected_clients) == 0:
-                        # Register first player and tell them to wait
                         connected_clients[client_sock] = "P1"
                         send_message(client_sock, {"msg_type": "LOBBY_WAIT"})
                         print("[FSM] P1 connected. Waiting for opponent...")
                         
                     elif len(connected_clients) == 1:
-                        # Register second player and initialize the game
                         connected_clients[client_sock] = "P2"
                         print("[FSM] P2 connected. Starting game...")
                         
-                        # Send GAME_START with role assignments and dummy hole cards
+                        # Send GAME_START with roles
                         for sock, role in connected_clients.items():
                             send_message(sock, {
                                 "msg_type": "GAME_START",
@@ -72,30 +75,80 @@ def handle_client(client_sock, addr):
                                 "hole_cards": ["As", "Kh"] if role == "P1" else ["Qc", "Qd"]
                             })
                             
-                        # Broadcast the initial board state to both clients
+                        # Broadcast the initial global board state
                         for sock in connected_clients.keys():
                             send_message(sock, game_state)
                             
                 elif msg_type == "MOVE":
                     sender_role = connected_clients.get(client_sock)
                     payload = message.get("payload", {})
-                    action = payload.get("action", "FOLD")
+                    action = payload.get("action", "FOLD").upper()
                     amount = int(payload.get("amount", 0))
                     
                     print(f"[FSM] Received {action} {amount} from {sender_role}")
                     
-                    # Mutate shared state based on the move
-                    if action in ["CALL", "RAISE"]:
-                        game_state["pot_size"] += amount
-                        if sender_role == "P1":
-                            game_state["p1_chips"] -= amount
-                        else:
-                            game_state["p2_chips"] -= amount
+                    # 1. Handle FOLD (Terminal State)
+                    if action == "FOLD":
+                        winner = "P2" if sender_role == "P1" else "P1"
+                        for sock in connected_clients.keys():
+                            try:
+                                send_message(sock, {
+                                    "msg_type": "GAME_OVER",
+                                    "winner": winner,
+                                    "reason": f"{sender_role} folded."
+                                })
+                            except:
+                                pass
+                        continue # Skips sending a standard STATE_UPDATE
+                        
+                    # 2. Extract player-specific state keys
+                    my_bet_key = "p1_bet" if sender_role == "P1" else "p2_bet"
+                    my_chip_key = "p1_chips" if sender_role == "P1" else "p2_chips"
+                    
+                    # 3. Validate and Apply Bets
+                    if action == "CHECK":
+                        if game_state[my_bet_key] < game_state["current_bet"]:
+                            send_message(client_sock, {"msg_type": "ERROR", "reason": "Cannot check. You must call the raise."})
+                            continue 
                             
-                    # Toggle the active turn
+                    elif action == "CALL":
+                        call_amount = game_state["current_bet"] - game_state[my_bet_key]
+                        game_state[my_chip_key] -= call_amount
+                        game_state[my_bet_key] += call_amount
+                        game_state["pot_size"] += call_amount
+                        
+                    elif action == "RAISE":
+                        new_total_bet = game_state["current_bet"] + amount
+                        cost = new_total_bet - game_state[my_bet_key]
+                        game_state[my_chip_key] -= cost
+                        game_state[my_bet_key] = new_total_bet
+                        game_state["current_bet"] = new_total_bet
+                        game_state["pot_size"] += cost
+
+                    game_state["actions_this_round"] += 1
+                    
+                    # 4. Check for Phase Advancement
+                    if game_state["actions_this_round"] >= 2 and game_state["p1_bet"] == game_state["p2_bet"]:
+                        if game_state["phase"] == "PRE_FLOP":
+                            game_state["phase"] = "FLOP"
+                            game_state["community_cards"] = ["Ah", "Kd", "7c"]
+                        elif game_state["phase"] == "FLOP":
+                            game_state["phase"] = "TURN"
+                            game_state["community_cards"].append("2s")
+                        elif game_state["phase"] == "TURN":
+                            game_state["phase"] = "RIVER"
+                            game_state["community_cards"].append("9h")
+                            
+                        # Reset street variables for the next betting round
+                        game_state["actions_this_round"] = 0
+                        game_state["p1_bet"] = 0
+                        game_state["p2_bet"] = 0
+                        game_state["current_bet"] = 0
+                            
+                    # 5. Toggle active turn
                     game_state["active_turn"] = "P2" if sender_role == "P1" else "P1"
                     
-                    # Broadcast updated state to unblock the next player's UI
+                    # 6. Broadcast updated state
                     for sock in connected_clients.keys():
                         send_message(sock, game_state)
                     

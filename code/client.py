@@ -22,10 +22,14 @@ def recv_exact(sock, n_bytes):
 
 def render_ui(state_dict, my_role):
     """CLI User Interface for game boards and score summaries."""
-    print("\n" + "="*40)
-    print(f"Pot: {state_dict.get('pot_size', 0)} | Community Cards: {state_dict.get('community_cards', [])}")
-    print(f"P1 Chips: {state_dict.get('p1_chips', 0)} | P2 Chips: {state_dict.get('p2_chips', 0)}")
-    print("="*40)
+    print("\n" + "="*50)
+    print(f"Phase: {state_dict.get('phase')} | Pot: {state_dict.get('pot_size', 0)}")
+    print(f"Community Cards: {state_dict.get('community_cards', [])}")
+    print(f"Current Bet to Match: {state_dict.get('current_bet', 0)}")
+    print("-" * 50)
+    print(f"P1 Chips: {state_dict.get('p1_chips', 0)} | P1 Round Bet: {state_dict.get('p1_bet', 0)}")
+    print(f"P2 Chips: {state_dict.get('p2_chips', 0)} | P2 Round Bet: {state_dict.get('p2_bet', 0)}")
+    print("="*50)
     
     if state_dict.get('active_turn') == my_role:
         return True
@@ -39,7 +43,7 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--port", type=int, required=True, help="Server port")
     args = parser.parse_args()
 
-    # Mandatory Graceful DNS Resolution Handling
+    # Mandatory Graceful DNS Resolution Handling[cite: 5]
     try:
         server_ip = socket.gethostbyname(args.hostname)
         print(f"[*] Resolved {args.hostname} to {server_ip}")
