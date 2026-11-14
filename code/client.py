@@ -28,7 +28,7 @@ def render_ui(state_dict, my_role):
     print("="*40)
     
     if state_dict.get('active_turn') == my_role:
-        return True # Indicates it is this client's turn
+        return True
     else:
         print(">>> Waiting for opponent...")
         return False
@@ -48,31 +48,23 @@ if __name__ == "__main__":
         print("Please check your Cisco router DNS configuration ('ip dns server' / 'ip host') or verify domain spelling.")
         sys.exit(1)
 
-    # TCP Socket Initialization & Connection
     client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         client_sock.connect((server_ip, args.port))
-        
-        # Example initial CONNECT payload matching Sprint 1 schema
         send_message(client_sock, {"msg_type": "CONNECT", "player_id": "pk_1"})
         
         my_role = None
 
-        # Main game loop blocking on exact TCP frames
         while True:
-            # 1. Read the 4-byte length header
             header = recv_exact(client_sock, 4)
             if not header:
                 print("\n[!] Server disconnected.")
                 break
                 
             payload_len = struct.unpack("!I", header)[0]
-            
-            # 2. Read exact JSON payload
             payload_bytes = recv_exact(client_sock, payload_len)
             message = json.loads(payload_bytes.decode("utf-8"))
             
-            # 3. Handle message types
             msg_type = message.get("msg_type")
             
             if msg_type == "LOBBY_WAIT":
@@ -84,14 +76,12 @@ if __name__ == "__main__":
             elif msg_type == "STATE_UPDATE":
                 is_my_turn = render_ui(message, my_role)
                 if is_my_turn:
-                    # Parse user input to extract action and optional bet amount
                     raw_input = input(">>> YOUR TURN! Enter action (FOLD, CHECK, CALL, RAISE [amount]): ").strip().split()
                     action = raw_input[0].upper() if raw_input else "FOLD"
                     amount = int(raw_input[1]) if len(raw_input) > 1 and raw_input[1].isdigit() else 0
                     
                     send_message(client_sock, {
                         "msg_type": "MOVE",
-                        "player_id": "pk_1", # Update this if using dynamic usernames later
                         "payload": {"action": action, "amount": amount}
                     })
             elif msg_type == "ERROR":
