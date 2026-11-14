@@ -108,7 +108,11 @@ def handle_client(client_sock, addr):
                     # 3. Validate and Apply Bets
                     if action == "CHECK":
                         if game_state[my_bet_key] < game_state["current_bet"]:
+                            # Send the error message
                             send_message(client_sock, {"msg_type": "ERROR", "reason": "Cannot check. You must call the raise."})
+                            
+                            # Re-send the state update to unblock this specific client's UI
+                            send_message(client_sock, game_state)
                             continue 
                             
                     elif action == "CALL":
